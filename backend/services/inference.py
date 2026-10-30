@@ -72,7 +72,9 @@ class InferenceService:
             k=min(limit,int(self.faiss_index.ntotal))
             scores, order = self.faiss_index.search(np.asarray(vector,dtype="float32").reshape(1,-1),k)
             scores, order = scores[0], order[0]
+            ranked = ((int(i), float(score)) for i, score in zip(order, scores) if 0 <= i < len(self.catalog))
         else:
             scores = self.embeddings @ vector
             order = np.argsort(-scores)[:limit]
-        return [{**self.catalog[i], "similarity": float(scores[i])} for i in order]
+            ranked = ((int(i), float(scores[i])) for i in order)
+        return [{**self.catalog[i], "similarity": score} for i, score in ranked]
