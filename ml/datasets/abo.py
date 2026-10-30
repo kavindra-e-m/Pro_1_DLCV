@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 from PIL import Image, UnidentifiedImageError
+from ml.datasets.handbag_filter import is_target_handbag
 
 ROOT = Path(__file__).resolve().parents[2]
 RAW = ROOT / "data/raw/abo"
@@ -29,12 +30,9 @@ def fields(record: dict, key: str) -> str:
     return ""
 
 def is_bag(record: dict) -> bool:
-    product_type = fields(record, "product_type").upper().replace(" ", "_")
-    if product_type: return product_type in BAG_TYPES
-    # Use category and title text only; long descriptions/keywords contain unrelated incidental mentions.
-    category = " ".join(str(x.get("path", "")) for x in record.get("node", []) if isinstance(x, dict))
-    title = fields(record, "item_name")
-    return bool(CATEGORY_TERMS.search(category) or TERMS.search(title))
+    product_type = fields(record, "product_type")
+    category = " | ".join(str(x.get("path", "")) for x in record.get("node", []) if isinstance(x, dict))
+    return is_target_handbag(product_type, fields(record, "item_name"), category)
 
 def acquire(max_products: int | None = None, max_images_per_product: int | None = None) -> dict:
     """Download and inspect only matching bag listings and their actual catalog images."""
@@ -111,7 +109,7 @@ def acquire(max_products: int | None = None, max_images_per_product: int | None 
         writer = csv.DictWriter(out, fieldnames=cols); writer.writeheader(); writer.writerows(rows)
     report = {"source": "Amazon Berkeley Objects", "source_url": "https://amazon-berkeley-objects.s3.us-east-1.amazonaws.com/index.html",
               "license": "CC BY 4.0", "attribution": "Amazon.com; ABO dataset authors listed in docs/dataset_documentation.md",
-              "category_filter": {"product_types": sorted(BAG_TYPES), "title_or_category_pattern": TERMS.pattern}, "matching_listing_records": len(products), "candidate_images": sum(map(len,wanted.values())),
+              "category_filter": {"scope": "handbags, purses and fashion totes only", "target_types": ["HANDBAG", "BAG with positive title evidence", "TOTE_BAG with positive fashion title evidence"], "excluded_types": sorted(BAG_TYPES - {"HANDBAG", "BAG", "TOTE_BAG"})}, "matching_listing_records": len(products), "candidate_images": sum(map(len,wanted.values())),
               "image_metadata_matches": len(image_meta), "downloaded_valid_images": len(rows),
               "identities_with_images": len({r['product_identity'] for r in rows}), "failed_images": len(errors),
               "errors": errors, "manifest": str(manifest)}

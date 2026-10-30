@@ -17,10 +17,15 @@ def test_real_image_search_compare_and_duplicate_detection():
         dashboard=client.get("/api/dashboard").json()
         assert dashboard["total_images"] >= 1
         assert dashboard["product_identities"] >= 1
+        assert dashboard["catalog_consistency"]["consistent"] is True
+        assert dashboard["calibration"] is not None
         search=client.post("/api/search",files={"file":(image_path.name,image_bytes,"image/jpeg")})
         assert search.status_code==200
         assert search.json()["results"][0]["similarity"]>.99
         compare=client.post("/api/compare",files={"image_a":(image_path.name,image_bytes,"image/jpeg"),"image_b":(image_path.name,image_bytes,"image/jpeg")})
         assert compare.status_code==200 and compare.json()["similarity"]>.99
         duplicates=client.post("/api/duplicate-detection",files=[("files",(image_path.name,image_bytes,"image/jpeg")),("files",(image_path.name,image_bytes,"image/jpeg"))])
-        assert duplicates.status_code==200 and len(duplicates.json()["groups"])==1
+        assert duplicates.status_code==200
+        body=duplicates.json()
+        if body["calibrated"]: assert len(body["groups"])==1
+        else: assert body["groups"]==[] and len(body["pairwise_scores"])==1

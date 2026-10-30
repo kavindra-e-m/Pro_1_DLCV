@@ -2,6 +2,7 @@ import csv, json
 from pathlib import Path
 from backend.database.db import SessionLocal, init_db
 from backend.database.models import Image, Product
+from backend.services.inference import sha256_file
 
 def import_catalog(manifest="data/processed/metadata/catalog.csv"):
     init_db()
@@ -27,6 +28,8 @@ def import_catalog(manifest="data/processed/metadata/catalog.csv"):
     except Exception:
         db.rollback();raise
     finally: db.close()
+    marker=Path("backend/data/catalog_import_metadata.json"); marker.parent.mkdir(parents=True,exist_ok=True)
+    marker.write_text(json.dumps({"manifest":str(Path(manifest).resolve()),"manifest_sha256":sha256_file(manifest),"images":len(rows)},indent=2),encoding="utf-8")
     print(f"Imported {len(rows)-added_images} existing and {added_images} new image records.")
     return {"images":len(rows),"new_images":added_images}
 if __name__=="__main__":import_catalog()

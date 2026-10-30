@@ -1,4 +1,4 @@
-import argparse, csv, json
+import argparse, csv, hashlib, json
 from pathlib import Path
 import numpy as np
 import torch
@@ -6,9 +6,18 @@ from PIL import Image
 from torchvision import transforms
 from ml.models.siamese import SiameseNetwork
 
+def sha256_file(path):
+    h=hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for block in iter(lambda:f.read(1024*1024),b""):h.update(block)
+    return h.hexdigest()
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument("--batch-size",type=int,default=16);args=parser.parse_args()
-    device=torch.device("cuda" if torch.cuda.is_available() else "cpu");state=torch.load("artifacts/checkpoints/siamese_resnet50.pt",map_location=device,weights_only=False)
+    selection_path=Path("artifacts/metrics/selected_model.json")
+    selection=json.loads(selection_path.read_text(encoding="utf-8")) if selection_path.exists() else {}
+    checkpoint=Path(selection.get("checkpoint","artifacts/checkpoints/siamese_resnet50.pt"))
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu");state=torch.load(checkpoint,map_location=device,weights_only=False)
     model=SiameseNetwork(int(state["embedding_dim"]),pretrained=False).to(device);model.load_state_dict(state["model_state_dict"]);model.eval()
     tf=transforms.Compose([transforms.Resize((224,224)),transforms.ToTensor(),transforms.Normalize([.485,.456,.406],[.229,.224,.225])])
     with open("data/processed/metadata/catalog.csv",encoding="utf-8",newline="") as f: rows=list(csv.DictReader(f))
@@ -36,6 +45,12 @@ def main():
         index_path.write_text(json.dumps({"backend":backend,"vectors":"../embeddings/catalog.npy"}),encoding="utf-8")
     with (out/"catalog.csv").open("w",encoding="utf-8",newline="") as f:
         writer=csv.DictWriter(f,fieldnames=kept[0].keys());writer.writeheader();writer.writerows(kept)
-    (dest/"index_metadata.json").write_text(json.dumps({"count":len(kept),"dimension":int(matrix.shape[1]),"backend":backend,"checkpoint":"artifacts/checkpoints/siamese_resnet50.pt"},indent=2),encoding="utf-8")
+    metadata={"count":len(kept),"dimension":int(matrix.shape[1]),"backend":backend,
+              "manifest":"data/processed/metadata/catalog.csv","manifest_sha256":sha256_file("data/processed/metadata/catalog.csv"),
+              "checkpoint":str(checkpoint),"checkpoint_sha256":sha256_file(checkpoint),"selected_model":selection.get("model","Siamese ResNet50"),
+              "catalog_csv_sha256":sha256_file(out/"catalog.csv"),"vectors_sha256":sha256_file(out/"catalog.npy"),
+              "index_file_sha256":sha256_file(index_path),
+              "ordered_product_identities":[r["product_identity"] for r in kept],"ordered_image_hashes":[r["image_hash"] for r in kept]}
+    (dest/"index_metadata.json").write_text(json.dumps(metadata,indent=2),encoding="utf-8")
     print(f"Indexed {len(kept)} genuine images with {backend}.")
 if __name__=="__main__":main()

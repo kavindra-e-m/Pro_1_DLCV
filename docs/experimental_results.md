@@ -1,25 +1,37 @@
 # Experimental results
 
-## Initial capped ABO experiment
+## Refined handbag experiment
 
-- Acquisition: `python -m scripts.prepare_data --max-products 250 --max-images-per-product 4`; exact ABO product IDs and image URLs were retained. After validation and cross-identity duplicate exclusion: 855 valid images, 235 product identities, 0 corrupted images, 31 ambiguous exact-image hash groups excluded. Category counts: HANDBAG 211, BACKPACK 184, BAG 53, LUGGAGE 52, SUITCASE 263, WALLET 55, TOTE_BAG 19 and CAMERA_BAGS_AND_CASES 18 images. These categories include adjacent bag/luggage types.
-- Split: seed 42; train 188 identities / 681 images, validation 23 / 86, test 24 / 88. Product identities are disjoint between partitions.
-- Siamese run: official ImageNet-pretrained ResNet50; 256-dimensional normalized embedding; contrastive loss; one epoch; batch size 8; AdamW learning rate 0.0001; CPU; seed 42. Training loss 0.51474; validation loss 0.30433. This short run validates the pipeline and is not a converged model.
-- Threshold: 0.33107, selected by maximum F1 on 149 validation pairs.
-- Held-out test: 152 pairs (64 positive, 88 negative). Accuracy 0.6974; precision 0.6154; recall 0.7500; F1 0.6761; ROC AUC 0.7711; average precision 0.6854. Confusion matrix: TN 58, FP 30, FN 16, TP 48.
-- Triplet comparison: one epoch, batch size 16, ImageNet ResNet50 encoder frozen while the projection head trained; train triplet loss 0.12923, validation triplet loss 0.13473. Its separately selected validation threshold was 0.07308. On the same 152 test pairs: accuracy 0.7763; precision 0.6923; recall 0.8438; F1 0.7606; ROC AUC 0.8686; average precision 0.8112. Confusion matrix: TN 64, FP 24, FN 10, TP 54.
-- Frozen DINOv2-base retrieval: official `facebook/dinov2-base` Apache-2.0 weights, no fine-tuning. On 88 test images, 86 queries had another same-identity test image; recall@1 0.3256, recall@5 0.6744, recall@10 0.8488, mAP 0.2878. This is a retrieval metric and is not directly comparable to the pair-classification numbers above.
-- Limitations: small capped sample; catalog imagery only; broad bag/luggage categories; one epoch; pair construction and class prevalence are not representative of deployment. Do not interpret these values as expected performance on user photographs.
+The initial broad ABO sample was audited and narrowed before this experiment. The retained scope is handbags, purses, and fashion bags verified from product type and listing-title metadata. Backpacks, luggage, suitcases, wallets, camera bags/cases, and grocery-style totes are excluded. See the [dataset audit](handbag_dataset_audit.md) for the filter rules, exclusions, and per-identity counts.
 
-The local JSON, CSV and curve artifacts are ignored by Git. They were generated from the run above and are not fabricated values.
+- **Data:** 248 valid catalog images from 66 product identities. Two identities have only one image. There were no invalid retained images and no repeated image hashes among retained records.
+- **Split:** seed 42, identity-disjoint: train 52 identities / 196 images; validation 7 / 24; test 7 / 28. Pair evaluation uses 47 validation pairs and 56 test pairs (28 positive, 28 negative). Retrieval has 28 test queries, each with at least one same-identity test image.
+- **Hardware and input:** CPU-only, Intel Core i5-13500H, 224×224 ImageNet-normalized images, ResNet50 initialized from ImageNet weights, 256-dimensional normalized embeddings. The Siamese run trained the final backbone block and projection; triplet runs used the same partial fine-tuning setup. All runs used seed 42, AdamW at 0.0001, maximum 20 epochs, and early stopping patience 5.
+- **Pair generation/mining:** Siamese pairs use different-image positives and visual-neighbor negatives between different identities. The triplet experiment compares batch-hard in-batch negative mining with random in-batch negatives.
 
-For future runs, include:
+### Held-out test results
 
-- Exact ABO acquisition cap and image cap, generated valid image and identity counts, source/license, and data-quality counts.
-- Split seed and identity counts per split.
-- Pretrained initialization and checkpoint source.
-- Batch size, learning rate, epochs, early stopping, device and wall-clock training time.
-- Validation threshold, positive/negative pair counts, test accuracy/precision/recall/F1/ROC AUC/average precision, and confusion matrix.
-- Exact command, code revision and any limitations of catalog-style imagery.
+The threshold for each learned model was selected only on its validation pairs by maximizing validation F1 (ties prefer precision and then a higher threshold). The production model was selected by validation F1, with validation precision as the tie-breaker. DINOv2 is a retrieval-only baseline and did not participate in threshold selection.
 
-The app reads `artifacts/metrics/evaluation.json` and training history. It does not display placeholder values.
+| Model | Epochs completed (best checkpoint) | Test accuracy | Precision | Recall | F1 | ROC AUC | Average precision | Retrieval R@1 / R@5 / R@10 | Retrieval mAP | CPU latency / image |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Siamese ResNet50, visual negatives **(selected)** | 15 (10) | 0.732 | 0.760 | 0.679 | 0.717 | 0.811 | 0.779 | 0.714 / 0.893 / 1.000 | 0.509 | 63.8 ms |
+| Triplet ResNet50, batch-hard | 9 (4) | 0.750 | 0.706 | 0.857 | 0.774 | 0.820 | 0.834 | 0.750 / 0.964 / 1.000 | 0.531 | 83.6 ms |
+| Triplet ResNet50, random negatives | 9 (4) | 0.750 | 0.719 | 0.821 | 0.767 | 0.827 | 0.876 | 0.786 / 0.929 / 0.964 | 0.547 | 47.8 ms |
+| Frozen DINOv2-base, retrieval only | — | — | — | — | — | — | — | 0.429 / 0.857 / 0.929 | 0.436 | 168.9 ms |
+
+Selected-model validation calibration: cosine threshold **0.55846**, precision **0.818**, recall **0.783**, F1 **0.800** on 47 pairs. At that fixed threshold, the test confusion matrix is **TN 22, FP 6, FN 9, TP 19**. The selected ResNet50 checkpoint is approximately 92 MiB. Frozen DINOv2-base is approximately 330 MiB.
+
+The Siamese run completed 15 epochs, with its best validation-loss checkpoint at epoch 10. It was resumed after an initial six-epoch process; the saved run timer covers the resumed process (12 min 7 sec), not the full experiment wall time. Both triplet runs completed 9 epochs and stopped early; each timed process took about 2 min 23 sec. The reported CPU latency is a 20-repeat average after three warmups and can vary with system load.
+
+### Measured curves
+
+![ROC curves for identity-held-out test pairs](figures/roc.png)
+
+![Precision–recall curves for identity-held-out test pairs](figures/pr_curve.png)
+
+### Interpretation and limitations
+
+These are preliminary measurements, not evidence of deployment readiness. The held-out set contains only seven product identities and 56 balanced pairs; each metric can move substantially with a few examples. The validation threshold is tied to the selected checkpoint hash, but its 47-pair calibration set is also small. Product listing identity means the same catalog product/model, not the same physical handbag. ABO studio images do not establish performance on customer photos, varied backgrounds, occlusions, or real duplicate-catalog workloads. The validation-F1 selection rule is fixed in advance in code, while the test metrics above remain held out from model/threshold selection.
+
+The first capped experiment (855 images, 235 identities, one training epoch) is retained in repository history for reproducibility; it is superseded by this filtered experiment and should not be represented as the final training run. Local image files, checkpoints, and machine-generated JSON/CSV are intentionally excluded from Git. The audit, measured summary, and plotted curves are tracked here.

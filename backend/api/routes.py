@@ -7,7 +7,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from backend.database.db import get_db
 from backend.database.models import Image, Product
-from backend.services.inference import InferenceService, ModelUnavailable
+from backend.services.inference import InferenceService, ModelUnavailable, sha256_file
+from backend.services.grouping import complete_link_groups
 
 router = APIRouter()
 log = logging.getLogger("bagvision.api")
@@ -33,7 +34,25 @@ def embed(image: PILImage.Image):
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": service.ready, "device": service.device, "dataset_indexed": service.index_size}
+    return {"status": "ok", "model_loaded": service.ready, "device": service.device,
+            "dataset_indexed": service.index_size,"index_valid":service.index_error is None,
+            "index_error":service.index_error,"calibrated":service.calibration is not None}
+
+def catalog_consistency(db: Session):
+    manifest=service.manifest_path
+    if not manifest.is_file(): return {"consistent":False,"reason":"Source manifest is missing."}
+    actual=sha256_file(manifest)
+    marker=Path("backend/data/catalog_import_metadata.json")
+    if not marker.is_file(): return {"consistent":False,"reason":"Database catalog has not been synchronized from the current manifest."}
+    try: imported=json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError): return {"consistent":False,"reason":"Database import metadata is invalid."}
+    db_rows=db.query(Product.product_identity,Image.image_hash).join(Image,Image.product_id==Product.id).filter(Product.source_dataset=="ABO").all()
+    index_rows={(r.get("product_identity"),r.get("image_hash")) for r in service.catalog}
+    db_pairs={(identity,digest) for identity,digest in db_rows}
+    consistent=(imported.get("manifest_sha256")==actual and db_pairs==index_rows and service.index_error is None)
+    return {"consistent":consistent,"database_manifest_matches":imported.get("manifest_sha256")==actual,
+            "database_image_rows":len(db_pairs),"retrieval_rows":len(index_rows),
+            "reason":None if consistent else "Database, manifest and retrieval index are out of sync; rerun preparation/import and rebuild the index."}
 
 @router.get("/dashboard")
 def dashboard(db: Session = Depends(get_db)):
@@ -41,7 +60,8 @@ def dashboard(db: Session = Depends(get_db)):
             "product_identities": db.query(func.count(Product.id)).scalar() or 0,
             "model": service.model_name if service.ready else "No checkpoint configured",
             "indexed_images": service.index_size, "last_indexed": service.indexed_at,
-            "metrics": service.metrics}
+            "metrics": service.metrics,"catalog_consistency":catalog_consistency(db),
+            "index_error":service.index_error,"calibration":service.calibration}
 
 @router.get("/model/metrics")
 def model_metrics(): return service.metrics
@@ -69,43 +89,40 @@ def product(product_id: int, db: Session = Depends(get_db)):
             "metadata": json.loads(row.metadata_json), "images": [{"id": i.id, "url": "/media/abo/" + Path(i.image_path).name} for i in row.images]}
 
 @router.post("/search")
-async def search(file: Annotated[UploadFile, File()], limit: int = 10):
+async def search(file: Annotated[UploadFile, File()], limit: int = 10, db: Session = Depends(get_db)):
+    consistency=catalog_consistency(db)
+    if not consistency["consistent"]:
+        raise HTTPException(503,consistency.get("reason") or "Database and retrieval catalog are not synchronized.")
     _, image = await read_image(file); vector = embed(image)
-    results = service.search(vector, max(1, min(limit, 100)))
+    try: results = service.search(vector, max(1, min(limit, 100)))
+    except ModelUnavailable as exc: raise HTTPException(503,str(exc)) from exc
     for row in results:
         if row.get("image_path"): row["image_path"] = "/media/abo/" + Path(row["image_path"]).name
-    return {"query_filename": file.filename, "results": results, "model": service.model_name}
+    return {"query_filename": file.filename, "results": results, "model": service.model_name,
+            "catalog_consistency":consistency}
 
 @router.post("/compare")
 async def compare(image_a: Annotated[UploadFile, File()], image_b: Annotated[UploadFile, File()]):
     _, a = await read_image(image_a); _, b = await read_image(image_b)
     va, vb = embed(a), embed(b); score = float((va * vb).sum())
-    threshold = float(service.metrics.get("threshold_selected_on_validation", os.getenv("BAGVISION_SIMILARITY_THRESHOLD", "0.72")))
-    return {"similarity": score, "same_product": score >= threshold,
-            "threshold": threshold, "model": service.model_name,
-            "explanation": "Cosine similarity of L2-normalized visual embeddings; validate the threshold on a held-out identity split."}
+    calibration=service.calibration
+    threshold=float(calibration["threshold"]) if calibration else None
+    return {"similarity":score,"same_product":(score>=threshold) if threshold is not None else None,
+            "calibrated":threshold is not None,"decision_status":"calibrated" if threshold is not None else "uncalibrated_similarity_only",
+            "threshold":threshold,"calibration":calibration,"model":service.model_name,
+            "explanation":"Cosine similarity of L2-normalized embeddings. A same/different decision is shown only when a checkpoint-matched validation calibration is available."}
 
 @router.post("/duplicate-detection")
 async def duplicate_detection(files: list[UploadFile] = File(...)):
     if len(files) < 2 or len(files) > 100: raise HTTPException(400, "Upload between 2 and 100 images.")
     images = [await read_image(f) for f in files]; vectors = [embed(image) for _, image in images]
-    threshold = float(service.metrics.get("threshold_selected_on_validation", os.getenv("BAGVISION_SIMILARITY_THRESHOLD", "0.72")))
-    parent=list(range(len(vectors))); edges=[]
-    def find(x):
-        while parent[x] != x: parent[x]=parent[parent[x]]; x=parent[x]
-        return x
+    names=[f.filename or f"upload_{i}" for i,f in enumerate(files)]
+    scores={}
     for i in range(len(vectors)):
-        for j in range(i+1,len(vectors)):
-            score=float((vectors[i]*vectors[j]).sum())
-            if score>=threshold:
-                ri,rj=find(i),find(j)
-                if ri!=rj: parent[rj]=ri
-                edges.append((i,j,score))
-    components={}
-    for i in range(len(vectors)):
-        root=find(i);components.setdefault(root,[]).append(i)
-    groups=[];assigned=set()
-    for members in components.values():
-        if len(members)>1:
-            member_set=set(members);groups.append({"files":[files[k].filename for k in members],"pairs":[{"a":files[i].filename,"b":files[j].filename,"similarity":score} for i,j,score in edges if i in member_set and j in member_set]});assigned.update(members)
-    return {"groups": groups, "unmatched": [files[i].filename for i in range(len(files)) if i not in assigned], "threshold": threshold}
+        for j in range(i+1,len(vectors)): scores[(i,j)]=float((vectors[i]*vectors[j]).sum())
+    if service.calibration:
+        result=complete_link_groups(names,scores,float(service.calibration["threshold"]))
+        return {**result,"calibrated":True,"threshold":service.calibration["threshold"],"calibration":service.calibration}
+    pairs=[{"a":names[i],"b":names[j],"similarity":score,"above_threshold":None} for (i,j),score in scores.items()]
+    return {"groups":[],"unmatched":names,"pairwise_scores":pairs,"manual_review_pairs":pairs,
+            "grouping_policy":"uncalibrated_pairwise_review_only","calibrated":False,"threshold":None,"calibration":None}

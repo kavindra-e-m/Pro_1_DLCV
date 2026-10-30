@@ -4,11 +4,11 @@
 
 ## Project status
 
-This repository contains the end-to-end implementation and acquisition/training commands. The first real ABO handbag subset is acquired locally during setup; images, generated reports, checkpoints and indexes are intentionally excluded from Git. Evaluation scores are displayed only after they have been calculated and saved by the evaluation command. There is no pretrained project checkpoint or evaluation result committed here.
+This repository contains the end-to-end application, a refined ABO handbag audit, identity-aware metric-learning experiments, checkpoint-bound calibration, and a version-checked retrieval index. In the current local audit, 248 valid catalog images from 66 ABO product identities remain after filtering adjacent luggage, backpack, wallet, camera and grocery-tote categories. Local images, reports, checkpoints and indexes are excluded from Git; the tracked [handbag audit](docs/handbag_dataset_audit.md) preserves the actual counts and identity-level image table. Model results are labeled preliminary or held-out according to the measured run; no sample metrics or images are inserted.
 
 ## Abstract
 
-BagVision AI explores whether two catalog photographs represent the same product design despite changes in view, crop, background or lighting. The system learns L2-normalized image embeddings with shared ResNet50 weights and contrastive loss, evaluates on identities held out from training, and ranks catalog images by cosine similarity. A triplet-loss implementation provides an experimental alternative. The interface supports visual retrieval, pair comparison, batch duplicate candidates, catalog browsing, model metrics and dataset provenance.
+BagVision AI explores whether two ABO handbag catalog images belong to the same product listing. It uses source listing identity, an identity-disjoint evaluation protocol, shared ResNet50 contrastive and batch-hard triplet experiments, a frozen DINOv2 retrieval baseline, and cosine-similarity retrieval. Catalog images are not real-world customer photos, and results from this small sample do not establish field performance. The application supports search, calibrated or explicitly uncalibrated comparison, complete-link duplicate review, model results and dataset audit.
 
 ## Problem and objectives
 
@@ -32,7 +32,7 @@ The proposed implementation uses genuine ABO product listings and catalog images
 | [Stanford Online Products](https://www.tensorflow.org/datasets/catalog/stanford_online_products) | Optional general product retrieval benchmark, if added later. | Not handbag-specific; never report it as a handbag dataset. |
 | [DINOv2 base](https://huggingface.co/facebook/dinov2-base) | Optional frozen feature encoder for an additional retrieval baseline. | Apache 2.0 per the official model card and DINOv2 repository. |
 
-The ABO release has 147,702 product listings and 398,212 unique catalog images in its full release. Bag category detection is based on the actual product type, item name, keywords and category path. The preparation command supports an optional listing cap for a manageable run; local counts and filtering outcomes are written to `data/reports/`. The generated CSV is the source of truth for counts.
+The ABO release has 147,702 product listings and 398,212 unique catalog images in its full release. The target data filter uses actual product type and listing-title evidence: `HANDBAG` plus fashion products verified from generic `BAG` records. The current bounded sample retained 248 images from 66 identities, with two identities having fewer than two images; all `TOTE_BAG` records in this capped sample were grocery-style and excluded. See [the detailed audit](docs/handbag_dataset_audit.md) and [dataset notes](docs/dataset_documentation.md). The ABO catalog-photo versus user-photo domain gap remains substantial.
 
 ABO attribution: Amazon.com; Matthieu Guillaumin, Thomas Dideriksen, Kenan Deng, Himanshu Arora, Arnab Dhua, Xi (Brian) Zhang, Tomas Yago-Vicente, Jasmine Collins, Shubham Goel and Jitendra Malik. See the [official dataset page](https://amazon-berkeley-objects.s3.us-east-1.amazonaws.com/index.html) and [CC BY 4.0 license](https://creativecommons.org/licenses/by/4.0/).
 
@@ -79,7 +79,7 @@ For an NVIDIA GPU, install the PyTorch build matching your installed CUDA versio
 2. Train the Siamese metric model. The first run downloads official ImageNet pretrained ResNet50 weights unless `--scratch` is supplied. CPU training can be slow; checkpoints support resumption.
 
    ```powershell
-   .venv\Scripts\python.exe -m scripts.train --epochs 20 --batch-size 8 --resume
+   .venv\Scripts\python.exe -m scripts.train --epochs 20 --batch-size 8 --negative-mode visual --train-last-block
    ```
 
 3. Evaluate the best checkpoint on held-out product identities, select a similarity decision threshold on validation pairs, and save metrics/curves:
@@ -87,6 +87,8 @@ For an NVIDIA GPU, install the PyTorch build matching your installed CUDA versio
    ```powershell
    .venv\Scripts\python.exe -m scripts.evaluate
    ```
+
+   The validation threshold is checkpoint-hash-bound. Without valid calibration the API returns similarity only. For the triplet comparison, run `python -m scripts.train_triplet --epochs 20 --mining batch-hard` and optionally `--mining random --run-name triplet_resnet50_random`; test thresholds are never tuned on test data.
 
 4. Build local image embeddings and the optional FAISS inner-product index:
 
@@ -132,9 +134,9 @@ No placeholder product rows or predictions are inserted. When a checkpoint or in
 
 ## Evaluation and current experimental results
 
-Initial experiments were completed locally on a capped ABO subset. The command selected 250 bag listings and up to four images per listing; after decoding and exact cross-identity duplicate review, 855 images across 235 identities remained. Seed 42 produced 188 train, 23 validation and 24 test identities. A one-epoch Siamese ResNet50 fine-tuning run started from official ImageNet weights and ran on CPU (training loss 0.51474; validation loss 0.30433). The validation threshold was 0.33107. On 152 held-out test pairs (64 positive, 88 negative), observed accuracy was 69.74%, precision 61.54%, recall 75.00%, F1 0.6761, ROC AUC 0.7711 and average precision 0.6854; confusion counts were TN=58, FP=30, FN=16, TP=48. An initial one-epoch Triplet ResNet50 head run (frozen ImageNet backbone) scored accuracy 77.63%, F1 0.7606 and ROC AUC 0.8686 on the same test pairs with its own validation threshold. Frozen DINOv2-base retrieval on the 88 test images yielded recall@1 0.3256, recall@5 0.6744, recall@10 0.8488 and mAP 0.2878 (86 queries had another same-identity test image). These are preliminary results from a small, catalog-photo sample, not a production performance claim. Full local artifacts are ignored by Git; details are recorded in [experimental results](docs/experimental_results.md).
+The refined, handbag-focused ABO subset contains 248 valid catalog images from 66 product identities, divided by identity into 52 train, 7 validation and 7 test identities. On 56 balanced held-out test pairs, the validation-selected Siamese ResNet50 with visual-neighbor negatives achieved accuracy 0.732, precision 0.760, recall 0.679, F1 0.717, ROC AUC 0.811 and average precision 0.779. Its validation-only cosine threshold was 0.55846 (47 validation pairs); the test confusion counts were TN=22, FP=6, FN=9, TP=19. Batch-hard and random-negative triplet runs scored test F1 0.774 and 0.767. Frozen DINOv2-base retrieval scored recall@1 0.429 and mAP 0.436; it is a retrieval-only comparison. Results are preliminary because the held-out split contains seven identities. See the detailed [experimental results and curves](docs/experimental_results.md) and the [dataset audit](docs/handbag_dataset_audit.md).
 
-Metrics include accuracy, precision, recall, F1, ROC AUC, average precision and a confusion matrix. The threshold is selected on validation identities; the test identities remain held out. Pair metrics do not establish performance on unrelated real-world photos or physical-unit identity.
+The threshold is bound to the selected checkpoint hash and is calibrated on the validation split; test pairs are not used for threshold selection. Pair metrics do not establish performance on real-world customer photos or physical-unit identity. Local images, checkpoints and machine-generated metrics remain excluded from Git.
 
 ## Limitations and future work
 
